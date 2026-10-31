@@ -1,0 +1,69 @@
+name: CI/CD - democyber
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  gitleaks:
+    name: Scan des secrets (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository (historique complet)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    needs: gitleaks
+    env:
+      DOCKER_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/democyber:latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Compile Java
+        run: mvn compile
+
+      - name: Build Java project with Maven
+        run: mvn clean package
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker image
+        run: docker build -t $DOCKER_IMAGE_NAME .
+
+      - name: Test Docker image locally
+        run: |
+          docker run -d -p 8080:8080 --name democyber-test $DOCKER_IMAGE_NAME
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:8080/actuator/health | grep -q '"UP"'; then
+              echo "Application OK"; docker rm -f democyber-test; exit 0
+            fi
+            sleep 2
+          done
+          echo "L'application ne répond pas"; docker logs democyber-test; exit 1
+
+      - name: Push Docker image to Docker Hub
+        if: github.event_name == 'push'
+        run: docker push $DOCKER_IMAGE_NAME
